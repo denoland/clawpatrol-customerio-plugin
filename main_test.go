@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -43,7 +45,7 @@ func TestCustomerIOBuildDefaultsReadOnlyEUEnv(t *testing.T) {
 func TestCustomerIOExchangeCachesTokenAndSendsReadOnlyScope(t *testing.T) {
 	var calls int
 	jwt := testJWT(time.Now().Add(time.Hour))
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	useCustomerIOTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s, want POST", r.Method)
@@ -73,10 +75,9 @@ func TestCustomerIOExchangeCachesTokenAndSendsReadOnlyScope(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(customerIOTokenResponse{AccessToken: jwt, TokenType: "Bearer", ExpiresIn: 3600})
 	}))
-	defer ts.Close()
 
 	cache := &customerIOTokenCache{tokens: map[string]cachedCustomerIOToken{}}
-	cfg := customerIOConfig{Region: "eu", ReadOnly: true, BaseURL: ts.URL}
+	cfg := customerIOConfig{Region: "eu", ReadOnly: true, BaseURL: "https://eu.fly.customer.io"}
 	for i := 0; i < 2; i++ {
 		got, err := cache.accessToken(context.Background(), cfg, "sa_live_test_secret")
 		if err != nil {
@@ -91,9 +92,31 @@ func TestCustomerIOExchangeCachesTokenAndSendsReadOnlyScope(t *testing.T) {
 	}
 }
 
+func TestCustomerIORejectsNonCustomerIOExchangeBaseURL(t *testing.T) {
+	cases := []customerIOConfig{
+		{Region: "eu", ReadOnly: true, BaseURL: "http://eu.fly.customer.io"},
+		{Region: "eu", ReadOnly: true, BaseURL: "https://example.invalid"},
+		{Region: "eu", ReadOnly: true, BaseURL: "https://us.fly.customer.io"},
+		{Region: "eu", ReadOnly: true, BaseURL: "https://eu.fly.customer.io/path"},
+	}
+	for _, cfg := range cases {
+		if _, _, err := exchangeCustomerIOServiceToken(context.Background(), cfg, "sa_live_test_secret"); err == nil {
+			t.Fatalf("exchangeCustomerIOServiceToken(%#v) succeeded, want validation error", cfg)
+		}
+	}
+}
+
+func TestCustomerIOCacheKeyIncludesBaseURL(t *testing.T) {
+	left := customerIOCacheKey(customerIOConfig{Region: "eu", ReadOnly: true, BaseURL: "https://eu.fly.customer.io"}, "sa_live_test_secret")
+	right := customerIOCacheKey(customerIOConfig{Region: "eu", ReadOnly: true, BaseURL: "https://us.fly.customer.io"}, "sa_live_test_secret")
+	if left == right {
+		t.Fatalf("cache key did not include base URL: %q", left)
+	}
+}
+
 func TestCustomerIOInjectHTTPSetsBearerJWT(t *testing.T) {
 	jwt := testJWT(time.Now().Add(time.Hour))
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	useCustomerIOTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Errorf("ParseForm: %v", err)
 			http.Error(w, "bad form", http.StatusInternalServerError)
@@ -102,9 +125,8 @@ func TestCustomerIOInjectHTTPSetsBearerJWT(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(customerIOTokenResponse{AccessToken: jwt, TokenType: "Bearer", ExpiresIn: 3600})
 	}))
-	defer ts.Close()
 
-	cfg := customerIOConfig{Region: "eu", ReadOnly: true, BaseURL: ts.URL}
+	cfg := customerIOConfig{Region: "eu", ReadOnly: true, BaseURL: "https://eu.fly.customer.io"}
 	cfgJSON, _ := json.Marshal(cfg)
 	oldCache := customerIOTokens
 	customerIOTokens = &customerIOTokenCache{tokens: map[string]cachedCustomerIOToken{}}
@@ -123,6 +145,25 @@ func TestCustomerIOInjectHTTPSetsBearerJWT(t *testing.T) {
 	if len(out.Redactions) != 1 || out.Redactions[0] != jwt {
 		t.Fatalf("redactions = %#v", out.Redactions)
 	}
+}
+
+func useCustomerIOTestServer(t *testing.T, handler http.Handler) {
+	t.Helper()
+	ts := httptest.NewTLSServer(handler)
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, network, ts.Listener.Addr().String())
+		},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	oldClient := customerIOHTTPClient
+	customerIOHTTPClient = &http.Client{Transport: tr}
+	t.Cleanup(func() {
+		customerIOHTTPClient = oldClient
+		tr.CloseIdleConnections()
+		ts.Close()
+	})
 }
 
 func testJWT(exp time.Time) string {

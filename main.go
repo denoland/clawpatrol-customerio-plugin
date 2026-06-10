@@ -28,7 +28,6 @@ const (
 type customerIOConfigInput struct {
 	Region   string `json:"region"`
 	ReadOnly *bool  `json:"read_only"`
-	BaseURL  string `json:"base_url"`
 }
 
 type customerIOConfig struct {
@@ -54,7 +53,10 @@ type customerIOTokenCache struct {
 	tokens map[string]cachedCustomerIOToken
 }
 
-var customerIOTokens = &customerIOTokenCache{tokens: map[string]cachedCustomerIOToken{}}
+var (
+	customerIOTokens     = &customerIOTokenCache{tokens: map[string]cachedCustomerIOToken{}}
+	customerIOHTTPClient = http.DefaultClient
+)
 
 func main() {
 	pluginsdk.Run(&pluginsdk.Plugin{
@@ -72,7 +74,6 @@ func customerIOServiceAccountDef() pluginsdk.CredentialDef {
 		Schema: pluginsdk.Schema{Fields: []pluginsdk.SchemaField{
 			{Name: "region", TypeString: "string"},
 			{Name: "read_only", TypeString: "bool"},
-			{Name: "base_url", TypeString: "string"},
 		}},
 		Build: func(req pluginsdk.BuildRequest) (any, error) {
 			cfg, err := buildCustomerIOConfig(req.ConfigJSON)
@@ -114,14 +115,10 @@ func buildCustomerIOConfig(raw []byte) (customerIOConfig, error) {
 	if in.ReadOnly != nil {
 		readOnly = *in.ReadOnly
 	}
-	baseURL := strings.TrimRight(strings.TrimSpace(in.BaseURL), "/")
-	if baseURL == "" {
-		baseURL = customerIOBaseURL(region)
-	}
 	return customerIOConfig{
 		Region:   region,
 		ReadOnly: readOnly,
-		BaseURL:  baseURL,
+		BaseURL:  customerIOBaseURL(region),
 	}, nil
 }
 
@@ -130,6 +127,45 @@ func customerIOBaseURL(region string) string {
 		return "https://eu.fly.customer.io"
 	}
 	return "https://us.fly.customer.io"
+}
+
+func decodeCustomerIOCanonicalConfig(raw []byte) (customerIOConfig, error) {
+	var cfg customerIOConfig
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return customerIOConfig{}, err
+		}
+	}
+	cfg.Region = strings.ToLower(strings.TrimSpace(cfg.Region))
+	if cfg.Region == "" {
+		cfg.Region = "us"
+	}
+	if cfg.Region != "us" && cfg.Region != "eu" {
+		return customerIOConfig{}, fmt.Errorf(`region must be "us" or "eu"`)
+	}
+	if strings.TrimSpace(cfg.BaseURL) == "" {
+		cfg.BaseURL = customerIOBaseURL(cfg.Region)
+	}
+	cfg.BaseURL = strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+	return cfg, nil
+}
+
+func validateCustomerIOBaseURL(baseURL, region string) error {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("parse Customer.io base URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("Customer.io base URL must use https")
+	}
+	expectedHost := "us.fly.customer.io"
+	if region == "eu" {
+		expectedHost = "eu.fly.customer.io"
+	}
+	if !strings.EqualFold(u.Host, expectedHost) || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("Customer.io base URL must be https://%s", expectedHost)
+	}
+	return nil
 }
 
 func customerIOEnvVars(cfg customerIOConfig) []pluginsdk.EnvVar {
@@ -146,7 +182,7 @@ func customerIOEnvVars(cfg customerIOConfig) []pluginsdk.EnvVar {
 }
 
 func injectCustomerIOHTTP(ctx context.Context, req pluginsdk.HTTPInjectRequest) (*pluginsdk.HTTPInjectResponse, error) {
-	cfg, err := buildCustomerIOConfig(req.CredentialCanonicalConfig)
+	cfg, err := decodeCustomerIOCanonicalConfig(req.CredentialCanonicalConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -194,10 +230,14 @@ func (c *customerIOTokenCache) accessToken(ctx context.Context, cfg customerIOCo
 
 func customerIOCacheKey(cfg customerIOConfig, serviceToken string) string {
 	h := sha256.Sum256([]byte(serviceToken))
-	return cfg.Region + "|" + fmt.Sprint(cfg.ReadOnly) + "|" + hex.EncodeToString(h[:])
+	return cfg.Region + "|" + strings.TrimRight(cfg.BaseURL, "/") + "|" + fmt.Sprint(cfg.ReadOnly) + "|" + hex.EncodeToString(h[:])
 }
 
 func exchangeCustomerIOServiceToken(ctx context.Context, cfg customerIOConfig, serviceToken string) (string, time.Time, error) {
+	if err := validateCustomerIOBaseURL(cfg.BaseURL, cfg.Region); err != nil {
+		return "", time.Time{}, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, customerIOTokenTimeout)
 	defer cancel()
 
@@ -216,7 +256,7 @@ func exchangeCustomerIOServiceToken(ctx context.Context, cfg customerIOConfig, s
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("User-Agent", "clawpatrol-customerio/"+pluginVersion)
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := customerIOHTTPClient.Do(httpReq)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("Customer.io token exchange: %w", err)
 	}
