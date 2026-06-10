@@ -1,0 +1,10 @@
+# build outputs
+/clawpatrol-customerio-plugin
+/customerio
+*.test
+
+# local editor/runtime files
+.DS_Store
+.env
+.env.*
+!.env.example
