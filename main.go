@@ -63,6 +63,12 @@ func main() {
 		Name:        pluginName,
 		Version:     pluginVersion,
 		Credentials: []pluginsdk.CredentialDef{customerIOServiceAccountDef()},
+		// The Customer.io service-token -> JWT exchange dials the
+		// Customer.io API from this subprocess, so declare the network
+		// requirement; the gateway records the approval in its lockfile.
+		Capabilities: pluginsdk.Capabilities{
+			Network: pluginsdk.NetworkOutbound,
+		},
 	})
 }
 
