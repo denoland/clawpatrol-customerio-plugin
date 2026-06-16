@@ -2,7 +2,7 @@ module github.com/dhruvkelawala/clawpatrol-customerio-plugin
 
 go 1.26.3
 
-require github.com/denoland/clawpatrol v0.0.0
+require github.com/denoland/clawpatrol v0.2.12
 
 require (
 	cel.dev/expr v0.25.1 // indirect
@@ -34,5 +34,3 @@ require (
 	google.golang.org/grpc v1.80.0 // indirect
 	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af // indirect
 )
-
-replace github.com/denoland/clawpatrol => ../clawpatrol
