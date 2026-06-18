@@ -2,7 +2,7 @@ module github.com/dhruvkelawala/clawpatrol-customerio-plugin
 
 go 1.26.3
 
-require github.com/denoland/clawpatrol v0.2.13-0.20260616070932-e67c8d75d78e
+require github.com/denoland/clawpatrol v0.3.0
 
 require (
 	cel.dev/expr v0.25.1 // indirect
